@@ -1,29 +1,17 @@
 from flask import Flask, request, jsonify, render_template
-from transformers import pipeline
+import requests
 import random
 import os
 
 app = Flask(__name__)
 
-# Enable CORS (important if frontend/backend mismatch happens)
+# Enable CORS
 from flask_cors import CORS
 CORS(app)
 
-# Lazy load model
-emotion_model = None
-
-def load_model():
-    global emotion_model
-    if emotion_model is None:
-        print("Loading emotion model...")
-        emotion_model = pipeline(
-            "text-classification",
-            model="j-hartmann/emotion-english-distilroberta-base",
-            return_all_scores=False
-        )
-        print("Model loaded successfully!")
-    return emotion_model
-
+# HuggingFace API
+API_URL = "https://api-inference.huggingface.co/models/j-hartmann/emotion-english-distilroberta-base"
+headers = {"Authorization": f"Bearer {os.environ.get('HF_TOKEN')}"}
 
 # Suggestions
 suggestions = {
@@ -63,12 +51,9 @@ suggestions = {
 def home():
     return render_template("index.html")
 
-
-# Optional health check (helps Render detect app is alive)
 @app.route("/health")
 def health():
     return "OK", 200
-
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
@@ -79,17 +64,25 @@ def analyze():
         if not text:
             return jsonify({"error": "Please enter some text"}), 400
 
-        model = load_model()
-        result = model(text)[0]
+        response = requests.post(API_URL, headers=headers, json={"inputs": text})
+        result = response.json()
 
-        emotion = result["label"].lower()
+        print("API RESPONSE:", result)
+
+        # If API sends error
+        if isinstance(result, dict):
+            return jsonify({"error": result.get("error", "API issue")}), 500
+
+        if not isinstance(result, list) or not result:
+            return jsonify({"error": "Invalid API response"}), 500
+
+        top_emotion = max(result[0], key=lambda x: x["score"])
+        emotion = top_emotion["label"].lower()
+        score = round(top_emotion["score"] * 100, 1)
 
         if emotion not in suggestions:
             emotion = "neutral"
 
-        score = round(result["score"] * 100, 1)
-
-        # Map unwanted emotions
         emotion_mapping = {
             "disgust": "anger",
             "surprise": "neutral"
@@ -107,11 +100,10 @@ def analyze():
         })
 
     except Exception as e:
-        print("Error:", str(e))
+        print("ERROR:", str(e))
         return jsonify({"error": "Something went wrong"}), 500
 
 
-# Only for local run
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
